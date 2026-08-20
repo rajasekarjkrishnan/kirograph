@@ -143,6 +143,7 @@ export function registerFrameworkResolver(resolver: FrameworkResolver): void {
 function buildResolutionContext(projectRoot: string, db: GraphDatabase): ResolutionContext {
   const fileCache = new Map<string, string | null>();
   const nodeCache = new Map<string, Node[]>();
+  const allIndexedFiles = db.getAllFiles().map(f => f.path);
 
   return {
     getNodesInFile(filePath: string): Node[] {
@@ -158,24 +159,41 @@ function buildResolutionContext(projectRoot: string, db: GraphDatabase): Resolut
       return db.getNodesByKind(kind);
     },
     fileExists(filePath: string): boolean {
-      return fs.existsSync(path.join(projectRoot, filePath));
+      // Check root first
+      if (fs.existsSync(path.join(projectRoot, filePath))) return true;
+      // Multi-root workspace: check if any indexed file matches the filename
+      const basename = path.basename(filePath);
+      return allIndexedFiles.some(f => f.endsWith('/' + basename) || f === basename);
     },
     readFile(filePath: string): string | null {
       if (fileCache.has(filePath)) return fileCache.get(filePath)!;
-      try {
-        const content = fs.readFileSync(path.join(projectRoot, filePath), 'utf8');
-        fileCache.set(filePath, content);
-        return content;
-      } catch {
-        fileCache.set(filePath, null);
-        return null;
+      // Try root first
+      const rootPath = path.join(projectRoot, filePath);
+      if (fs.existsSync(rootPath)) {
+        try {
+          const content = fs.readFileSync(rootPath, 'utf8');
+          fileCache.set(filePath, content);
+          return content;
+        } catch { /* fall through */ }
       }
+      // Multi-root workspace: find first matching file in indexed paths
+      const basename = path.basename(filePath);
+      const match = allIndexedFiles.find(f => f.endsWith('/' + basename) || f === basename);
+      if (match) {
+        try {
+          const content = fs.readFileSync(path.join(projectRoot, match), 'utf8');
+          fileCache.set(filePath, content);
+          return content;
+        } catch { /* fall through */ }
+      }
+      fileCache.set(filePath, null);
+      return null;
     },
     getProjectRoot(): string {
       return projectRoot;
     },
     getAllFiles(): string[] {
-      return db.getAllFiles().map(f => f.path);
+      return allIndexedFiles;
     },
   };
 }
