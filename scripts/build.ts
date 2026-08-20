@@ -64,13 +64,28 @@ function copyAssets(): void {
     }
   }
 
-  // tree-sitter wasm files
+  // tree-sitter wasm files (bundled from src/extraction/wasm/)
   const wasmSrc = path.join(src, 'extraction', 'wasm');
   const wasmDst = path.join(dist, 'extraction', 'wasm');
   fs.mkdirSync(wasmDst, { recursive: true });
   if (fs.existsSync(wasmSrc)) {
     for (const f of fs.readdirSync(wasmSrc).filter(f => f.endsWith('.wasm'))) {
       fs.copyFileSync(path.join(wasmSrc, f), path.join(wasmDst, f));
+    }
+  }
+
+  // Also bundle mainstream language WASMs from tree-sitter-wasms for global install support.
+  // When installed globally via `npm install -g .`, require.resolve() cannot find
+  // tree-sitter-wasms at runtime. Bundling them in dist/ ensures they're always available.
+  const treeSitterWasmsDir = path.join(root, 'node_modules', 'tree-sitter-wasms', 'out');
+  if (fs.existsSync(treeSitterWasmsDir)) {
+    const mainstreamWasms = fs.readdirSync(treeSitterWasmsDir).filter(f => f.endsWith('.wasm'));
+    for (const f of mainstreamWasms) {
+      const destFile = path.join(wasmDst, f);
+      // Don't overwrite locally-compiled bundled WASMs (e.g. HCL, SCSS, Pascal)
+      if (!fs.existsSync(destFile)) {
+        fs.copyFileSync(path.join(treeSitterWasmsDir, f), destFile);
+      }
     }
   }
 

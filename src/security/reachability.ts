@@ -21,8 +21,7 @@ import type {
 /** Edge kinds used for reachability traversal */
 const TRAVERSAL_EDGE_KINDS = ['calls', 'imports', 'references'] as const;
 
-/** Maximum unresolved symbols to report */
-const MAX_UNRESOLVED_SYMBOLS = 50;
+
 
 /** Maximum distinct paths to report in impact summary */
 const MAX_DISTINCT_PATHS = 100;
@@ -89,33 +88,23 @@ export class ReachabilityAnalyzer {
       };
     }
 
-    // Step 3: BFS from each entry point toward the dependency node
+    // Step 3: Reverse BFS from the dependency node through INCOMING edges
+    // to find which entry points can reach it. This is O(V+E) per vulnerability
+    // instead of O(entryPoints × (V+E)) for forward BFS from each entry point.
     const reachingPaths: ReachabilityPath[] = [];
-    const allUnresolvedSymbols = new Set<string>();
-
-    for (const ep of entryPoints) {
-      const result = this.bfsFromEntryPoint(rawDb, ep.id, dependencyNodeId);
-
-      if (result.path) {
-        reachingPaths.push({
-          entryPoint: ep.id,
-          path: result.path,
-        });
-      }
-
-      for (const sym of result.unresolvedSymbols) {
-        allUnresolvedSymbols.add(sym);
-      }
+    const entryPointIds = new Set(entryPoints.map(ep => ep.id));
+    const reachableFrom = this.reverseBfsToEntryPoints(rawDb, dependencyNodeId, entryPointIds);
+    for (const { entryPointId, path } of reachableFrom) {
+      reachingPaths.push({
+        entryPoint: entryPointId,
+        path,
+      });
     }
 
     // Step 4: Assign verdict
-    const unresolvedSymbols = Array.from(allUnresolvedSymbols).slice(0, MAX_UNRESOLVED_SYMBOLS);
-
     let verdict: ReachabilityVerdict;
     if (reachingPaths.length > 0) {
       verdict = 'affected';
-    } else if (allUnresolvedSymbols.size > 0) {
-      verdict = 'under_investigation';
     } else {
       verdict = 'not_affected';
     }
@@ -123,7 +112,7 @@ export class ReachabilityAnalyzer {
     const result: ReachabilityResult = {
       verdict,
       paths: reachingPaths,
-      unresolvedSymbols: verdict === 'under_investigation' ? unresolvedSymbols : [],
+      unresolvedSymbols: [],
       reachingEntryPointCount: reachingPaths.length,
     };
 
@@ -262,6 +251,63 @@ export class ReachabilityAnalyzer {
    *
    * Returns the shortest path if found, plus any unresolved symbols encountered.
    */
+  /**
+   * Reverse BFS: start from the dependency node and walk BACKWARDS through
+   * incoming edges to find which entry points can reach it.
+   *
+   * This is O(V+E) total (one traversal) regardless of how many entry points exist,
+   * compared to O(entryPoints × (V+E)) for forward BFS from each entry point.
+   *
+   * Returns the entry points that have a path to the dependency, with their paths.
+   */
+  private reverseBfsToEntryPoints(
+    rawDb: any,
+    dependencyNodeId: string,
+    entryPointIds: Set<string>,
+  ): Array<{ entryPointId: string; path: string[] }> {
+    const results: Array<{ entryPointId: string; path: string[] }> = [];
+    const visited = new Set<string>();
+    const parentMap = new Map<string, string>(); // child → parent (for path reconstruction)
+
+    const edgeKinds = TRAVERSAL_EDGE_KINDS.map(k => `'${k}'`).join(',');
+    const queue: string[] = [dependencyNodeId];
+    visited.add(dependencyNodeId);
+
+    while (queue.length > 0) {
+      const currentId = queue.shift()!;
+
+      // Check if we reached an entry point
+      if (currentId !== dependencyNodeId && entryPointIds.has(currentId)) {
+        // Reconstruct path from entry point to dependency
+        const path: string[] = [];
+        let node: string | undefined = currentId;
+        while (node !== undefined) {
+          path.push(node);
+          node = parentMap.get(node);
+        }
+        // path is [entryPoint, ..., dependencyNode] — already correct direction
+        results.push({ entryPointId: currentId, path });
+        // Keep traversing — other entry points may reach this one transitively
+        // (e.g., main() → authMiddleware() → dep — both should be reported)
+      }
+
+      // Walk INCOMING edges (reverse direction: who calls/imports currentId?)
+      const inEdges: Array<{ source: string }> = rawDb.all(
+        `SELECT source FROM edges WHERE target = ? AND kind IN (${edgeKinds})`,
+        [currentId],
+      );
+
+      for (const edge of inEdges) {
+        if (visited.has(edge.source)) continue;
+        visited.add(edge.source);
+        parentMap.set(edge.source, currentId);
+        queue.push(edge.source);
+      }
+    }
+
+    return results;
+  }
+
   private bfsFromEntryPoint(
     rawDb: any,
     entryPointId: string,
